@@ -9,7 +9,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report
 from dotenv import load_dotenv
-from supabase import create_client, Client
+from supabase import create_client
+from sklearn.pipeline import Pipeline
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -34,7 +35,7 @@ def load_db():
 def load_data(feature_file):
     try:
         supabase = load_db()
-        response = supabase.table('amazon_reviews').select("*").execute()
+        response = supabase.table('amazon_reviews').select("full_review, rating, polarity_score, sentiment_label").limit(50000).execute()
         
         if response.data:
             logging.info("Loaded data from Supabase DB.")
@@ -59,32 +60,54 @@ def train_model(feature_file):
     df = load_data(feature_file)
     if df is None:
         return None
+    logging.info(f"Load {len(df)} from supabase successfully")
     
+    initial_count = len(df)
+    df['rating'] = pd.to_numeric(df['rating'], errors='coerce')
+    df['polarity_score'] = pd.to_numeric(df['polarity_score'], errors='coerce')
+
+    consistent_pos = (df['rating'] >= 4) & (df['polarity_score'] > 0.1)
+    
+    consistent_neg = (df['rating'] <= 2) & (df['polarity_score'] < -0.1)
+    
+    df_clean = df[consistent_pos | consistent_neg].copy()
+    df_clean['target'] = df_clean['rating'].apply(lambda x: 1 if x >= 4 else 0)
+    
+    dropped_count = initial_count - len(df_clean)
+    logging.info(f"Dropped {dropped_count} ambiguous/inconsistent reviews.")
+    logging.info(f"Final High-Quality Dataset Size: {len(df_clean)}")
+    
+    df = df_clean
     X_text = df['full_review'].fillna('').astype(str)
-    y = df['sentiment_label']
+    y = df['target']
     
     logging.info("Splitting Data into Train (80%) and Test (20%)...")
-    X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+    X_train, X_test, y_train, y_test = train_test_split(
         X_text, y, test_size=0.2, random_state=42, stratify=y
     )
 
-    logging.info("Vectorizing text with TF-IDF...")
-    vectorizer = TfidfVectorizer(max_features=5000, ngram_range=(1,2))
+    logging.info("Vectorizing text with TF-IDF and train with Logistic Regression...")
+    pipeline = Pipeline([
+        ('tfidf', TfidfVectorizer(
+            stop_words='english',
+            ngram_range=(1, 3), 
+            min_df=3,
+            max_features=10000,
+            sublinear_tf=True
+        )),
+        ('clf', LogisticRegression(
+            solver='lbfgs',    
+            max_iter=1000,   
+            class_weight='balanced' 
+        ))
+    ])
 
-    X_train = vectorizer.fit_transform(X_train_raw)
-    X_test = vectorizer.transform(X_test_raw)
-    
-    logging.info("Running GridSearchCV to find best hyperparameters...")
-    
-    base_model = LogisticRegression(multi_class='ảuto', solver='lbfgs', max_iter=1000)
-    
     param_grid = {
-        'C': [0.1, 1, 10],               
-        'class_weight': [None, 'balanced']
+        'clf__C': [0.01, 0.1, 0.5, 1, 5] 
     }
     
     grid = GridSearchCV(
-        estimator=base_model,
+        estimator=pipeline,
         param_grid=param_grid,
         cv=5,
         scoring='accuracy',
@@ -107,15 +130,15 @@ def train_model(feature_file):
     model_name = "sentiment_model_logistic.pkl"
     model_path = os.path.join(MODEL_DIR, model_name)
     
-    with open(model_path, 'wb') as f:
-        pickle.dump(best_model, f)
+    # with open(model_path, 'wb') as f:
+    #     pickle.dump(best_model, f)
         
-    vec_path = os.path.join(MODEL_DIR, 'tfidf_vectorizer.pkl')
-    with open(vec_path, 'wb') as f:
-        pickle.dump(vectorizer, f)
+    # vec_path = os.path.join(MODEL_DIR, 'tfidf_vectorizer.pkl')
+    # with open(vec_path, 'wb') as f:
+    #     pickle.dump(vectorizer, f)
         
-    logging.info(f"Model training completed.")
-    logging.info(f"Saved model to: {model_path}")
+    # logging.info(f"Model training completed.")
+    # logging.info(f"Saved model to: {model_path}")
     
     return model_path
 
