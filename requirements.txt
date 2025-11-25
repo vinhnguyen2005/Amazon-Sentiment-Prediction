@@ -1,0 +1,10 @@
+
+apache-airflow
+pandas
+numpy
+scikit-learn
+supabase
+nltk
+kaggle
+python-dotenv
+pytz
