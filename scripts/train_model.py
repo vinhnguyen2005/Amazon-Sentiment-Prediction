@@ -11,7 +11,7 @@ from sklearn.metrics import accuracy_score, classification_report
 from dotenv import load_dotenv
 from supabase import create_client
 from sklearn.pipeline import Pipeline
-
+import json
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 CURRENT_SCRIPT_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -19,7 +19,7 @@ PROJECT_ROOT = os.path.dirname(CURRENT_SCRIPT_PATH)
 DATA_DIR = os.path.join(PROJECT_ROOT, 'data')
 INPUT_DIR = os.path.join(DATA_DIR, 'processed')
 MODEL_DIR = os.path.join(PROJECT_ROOT, 'models')
-
+METADATA_FILE = os.path.join(DATA_DIR, 'metadata', 'kaggle_dataset_processed.json')
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 load_dotenv()
@@ -30,9 +30,31 @@ def load_db():
     url: str = os.environ.get("SUPABASE_URL")
     key: str = os.environ.get("SUPABASE_KEY")    
     return create_client(url, key)
-    
 
-def load_data(feature_file):
+def get_files_from_metadata():
+
+    if not os.path.exists(METADATA_FILE):
+        logging.warning(f"Metadata file not found at {METADATA_FILE}")
+        return None
+    
+    try:
+        with open(METADATA_FILE, 'r') as f:
+            metadata = json.load(f)
+        
+        latest_files = metadata.get('files', [])
+        
+        if not latest_files:
+            logging.warning("Metadata found but 'files' list is empty.")
+            return None
+            
+        logging.info(f"Metadata indicates {len(latest_files)} files processed at {metadata.get('processed_at')}")
+        return latest_files
+        
+    except Exception as e:
+        logging.error(f"Error reading metadata: {e}")
+        return None 
+
+def load_data():
     try:
         supabase = load_db()
         response = supabase.table('amazon_reviews').select("full_review, rating, polarity_score, sentiment_label").limit(50000).execute()
@@ -47,17 +69,35 @@ def load_data(feature_file):
     except Exception as e:
         logging.error(f"Error loading data from DB: {e}. Falling back to CSV.")
         
-    if os.path.exists(feature_file):
-        logging.info(f"Loading data from CSV file: {feature_file}")
-        df = pd.read_csv(feature_file)
-        return df
-    else:
-        logging.error(f"Feature file not found: {feature_file}")
-        return None
+    if df is None:
+        logging.info("Checking metadata for latest processed files...")
+        
+        target_files = get_files_from_metadata() 
+        
+        if target_files:
+            data_frames = []
+            for file_path in target_files:
+                if os.path.exists(file_path):
+                    logging.info(f"Reading file: {file_path}")
+                    try:
+                        temp_df = pd.read_csv(file_path)
+                        data_frames.append(temp_df)
+                    except Exception as e:
+                        logging.error(f"Failed to read {file_path}: {e}")
+                else:
+                    logging.warning(f"File listed in metadata but not found on disk: {file_path}")
+            
+            if data_frames:
+                df = pd.concat(data_frames, ignore_index=True)
+                logging.info(f"Successfully loaded {len(df)} records from metadata files.")
+            else:
+                logging.error("No valid files could be loaded from metadata list.")
+
+    return df
 
 
-def train_model(feature_file):
-    df = load_data(feature_file)
+def train_model():
+    df = load_data()
     if df is None:
         return None
     logging.info(f"Load {len(df)} from supabase successfully")
@@ -127,21 +167,8 @@ def train_model(feature_file):
     logging.info(f"FINAL TEST ACCURACY: {test_acc:.4f}")
     print(classification_report(y_test, y_pred))
     
-    model_name = "sentiment_model_logistic.pkl"
-    model_path = os.path.join(MODEL_DIR, model_name)
-    
-    # with open(model_path, 'wb') as f:
-    #     pickle.dump(best_model, f)
+    model_path = os.path.join(MODEL_DIR, "sentiment_pipeline_logistic.pkl")
+    with open(model_path, 'wb') as f:
+        pickle.dump(best_model, f)
         
-    # vec_path = os.path.join(MODEL_DIR, 'tfidf_vectorizer.pkl')
-    # with open(vec_path, 'wb') as f:
-    #     pickle.dump(vectorizer, f)
-        
-    # logging.info(f"Model training completed.")
-    # logging.info(f"Saved model to: {model_path}")
-    
     return model_path
-
-if __name__ == "__main__":
-    sample_path = '/mnt/d/AOIVietNam/Project/BlogModule6W1_2/data/processed/processed_Amazon_Reviews_20251122_182324.csv'
-    train_model(sample_path)
